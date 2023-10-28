@@ -1,0 +1,146 @@
+#Loading the libraries
+library(worldfootballR)
+library(tidyverse)
+library(dplyr)
+library(caret)
+
+#Scraping the data with WorldFootball R
+serie_a_shot_locations <- load_understat_league_shots(league = "Serie A")
+dplyr::glimpse(serie_a_shot_locations)
+EPL_shot_locations <- load_understat_league_shots(league = "EPL")
+dplyr::glimpse(EPL_shot_locations)
+Ligue1_shot_locations <- load_understat_league_shots(league = "Ligue 1")
+dplyr::glimpse(Ligue1_shot_locations)
+Bundesliga_shot_locations <- load_understat_league_shots(league = "Bundesliga")
+dplyr::glimpse(Bundesliga_shot_locations)
+LaLiga_shot_locations <- load_understat_league_shots(league = "La liga")
+dplyr::glimpse(LaLiga_shot_locations)
+
+#Cleaning the Data
+colnames(EPL_shot_locations)
+EPL_shot_locations <- EPL_shot_locations %>%
+  mutate(xG = coalesce(xG, x_g))
+EPL_shot_locations <- EPL_shot_locations %>%
+  mutate(X = coalesce(x, X))
+EPL_shot_locations <-EPL_shot_locations %>%
+  mutate(Y=coalesce(y,Y))
+EPL_shot_locations <-EPL_shot_locations %>%
+  mutate(h_a=coalesce(h_a,home_away))
+EPL_shot_locations <-EPL_shot_locations %>%
+  mutate(shotType=coalesce(shot_type,shotType))
+EPL_shot_locations <-EPL_shot_locations %>%
+  mutate(lastAction=coalesce(lastAction,last_action))
+colnames(Bundesliga_shot_locations)
+Bundesliga_shot_locations <- Bundesliga_shot_locations %>%
+  mutate(h_a = coalesce(h_a,home_away))
+
+EPL_shot_locations$x_g <- EPL_shot_locations$xG
+EPL_shot_locations$x <- EPL_shot_locations$X
+EPL_shot_locations$y <- EPL_shot_locations$Y
+EPL_shot_locations$home_away <- EPL_shot_locations$h_a
+EPL_shot_locations$shot_type <- EPL_shot_locations$shotType
+EPL_shot_locations$last_action <- EPL_shot_locations$lastAction
+Bundesliga_shot_locations $home_away <- Bundesliga_shot_locations$h_a
+
+
+combined_data <- bind_rows(LaLiga_shot_locations,serie_a_shot_locations,
+                           Ligue1_shot_locations, Bundesliga_shot_locations,
+                           EPL_shot_locations)
+
+colnames(combined_data)
+
+combined_data <- combined_data %>%
+  select(-x, -y, -x_g, -shot_type, -last_action, -home_away)
+
+columns_with_na <- colnames(combined_data)[colSums(is.na(combined_data)) > 0]
+columns_with_na
+
+#Converting data to numeric
+
+combined_data$situation_code <- as.numeric(factor(combined_data$situation))
+combined_data$shotType_code <- as.numeric(factor(combined_data$shotType))
+combined_data$lastAction_code <- as.numeric(factor(combined_data$lastAction))
+combined_data$result_code <- as.numeric(factor(combined_data$result))
+
+#Copying into an excel file for reference
+library(writexl)
+filepathcombineddata<- "CombinedAllShots.xlsx"
+write_xlsx(combined_data,path=filepathcombineddata)
+
+#Converting coordinates to 120,80 coordinate system
+
+combined_data$X <- combined_data$X*120
+combined_data$Y <- combined_data$Y*80
+
+#Coordinates of the goal
+goal_x <- 120
+goal_y <- 40
+
+#Calculating Distance to Goal
+combined_data$distance_to_goal <- sqrt((combined_data$X - goal_x)^2 + (combined_data$Y - goal_y)^2)
+head(combined_data$distance_to_goal)
+
+# Calculate the shot angle in radians
+combined_data$shot_angle_radians <- atan2(combined_data$Y - goal_y, combined_data$X - goal_x)
+
+# Convert radians to degrees
+combined_data$shot_angle_degrees <- combined_data$shot_angle_radians * (180 / pi)
+
+combined_data$goal_or_shot <- ifelse(combined_data$result == "Goal", 1, 0)
+head(combined_data$goal_or_shot,10)
+
+# Split data into training and testing sets
+set.seed(123)  # For reproducibility
+
+# Split into 70% training and 30% testing
+train_indices <- createDataPartition(combined_data$goal_or_shot, p = 0.70, list = FALSE)
+train_data <- combined_data[train_indices, ]
+test_data <- combined_data[-train_indices, ]
+
+#Using Logistic Regression
+LR_model <- glm(combined_data$goal_or_shot ~ combined_data$distance_to_goal
+                + combined_data$shot_angle_degrees 
+                + combined_data$lastAction_code + combined_data$result_code
+                + combined_data$situation_code + combined_data$shotType_code
+                + combined_data$X + combined_data$Y,
+                data = train_data,
+                family = binomial)
+
+# Make predictions on the test data
+LR_predictions <- predict(LR_model, newdata = test_data, type = "response")
+combined_data$LRpredictions <- LR_predictions
+summary(LR_predictions)
+
+#Creating a histogram for the predictions
+hist(LR_predictions)
+
+filepathcombineddata<- "CombinedAllShots2.xlsx"
+write_xlsx(combined_data,path=filepathcombineddata)
+
+# Evaluate the model
+library(pROC)
+roc_object <- roc(combined_data$goal_or_shot, LR_predictions)
+auc <- auc(roc_object)
+cat("AUC:", auc, "\n")
+
+
+##AUC for LOGISTIC REGRESSION is 0.8510448 WITH X and Y
+##AUC FOR LOGISTIC REGRESSION WITHOUT X AND Y IS 0.8449989
+
+
+# Assuming you have true labels and model predictions
+true_labels <- combined_data$goal_or_shot  # Actual labels
+predicted_probs <- LR_predictions  # Predicted probabilities
+
+# Create the confusion matrix
+confusion_matrix <- confusionMatrix(data = as.factor(ifelse(predicted_probs > 0.5, 1, 0)),
+                                    reference = as.factor(true_labels))
+
+# Print the confusion matrix
+confusion_matrix
+
+# Assuming you have a confusion matrix, checking F1 score for accuracy
+precision <- confusion_matrix$byClass["Pos Pred Value"]
+recall <- confusion_matrix$byClass["Sensitivity"]
+f1_score <- confusion_matrix$byClass["F1"]
+f1_score
